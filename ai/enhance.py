@@ -51,12 +51,13 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 # 约定接口返回 {"sensitive": true/false, ...}
                 return result.get("sensitive", True)
             else:
-                # 如果接口异常，默认不触发敏感词
-                print(f"Sensitive check failed with status {resp.status_code}", file=sys.stderr)
-                return True
+                # 如果接口异常，默认放行(False)，避免因服务挂掉导致数据丢失
+                print(f"Sensitive check failed with status {resp.status_code}, defaulting to False (allow)", file=sys.stderr)
+                return False
         except Exception as e:
-            print(f"Sensitive check error: {e}", file=sys.stderr)
-            return True
+            # 如果请求超时或报错，默认放行(False)，避免数据丢失
+            print(f"Sensitive check error: {e}, defaulting to False (allow)", file=sys.stderr)
+            return False
 
     def check_github_code(content: str) -> Dict:
         """提取并验证 GitHub 链接"""
@@ -107,6 +108,7 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
 
     # 检查 summary 字段
     if is_sensitive(item.get("summary", "")):
+        print(f"⚠️ Skipping sensitive item (Summary): {item.get('id', 'unknown')} - {item.get('title', 'No Title')}", file=sys.stderr)
         return None
 
     # 检测代码可用性
@@ -160,8 +162,9 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
             item['AI'][field] = default_ai_fields[field]
 
     # 检查 AI 生成的所有字段
-    for v in item.get("AI", {}).values():
+    for k, v in item.get("AI", {}).values():
         if is_sensitive(str(v)):
+            print(f"⚠️ Skipping sensitive item (AI content - {k}): {item.get('id', 'unknown')}", file=sys.stderr)
             return None
     return item
 

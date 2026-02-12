@@ -308,21 +308,20 @@ jobs:
         # Before switching branches, clean untracked files that might conflict
         # 这些文件已经保存到临时目录，所以可以安全删除
         # These files are already saved to temporary directory, so safe to remove
-        rm -rf data/*.jsonl 2>/dev/null || true
+        rm -rf data/* 2>/dev/null || true
         rm -f assets/file-list.txt 2>/dev/null || true
         
         # 检查 data 分支是否存在 / Check if data branch exists
         if git ls-remote --heads origin data | grep -q data; then
           echo "data 分支已存在，切换到 data 分支 / Data branch exists, switching to data branch"
-          git fetch origin data:data
-          git checkout data
-          git pull origin data || true
+          git fetch origin data
+          # 使用 -f 强制切换，确保没有任何 untracked 文件能阻止切换
+          git checkout -f data
+          git reset --hard origin/data
         else
           echo "data 分支不存在，创建新分支 / Data branch does not exist, creating new branch"
-          # 创建空的 data 分支 / Create empty data branch
           git checkout --orphan data
           git rm -rf --cached . 2>/dev/null || true
-          # 确保 data 和 assets 目录存在 / Ensure data and assets directories exist
           mkdir -p data assets
           echo "# Data Branch" > README.md
           git add README.md

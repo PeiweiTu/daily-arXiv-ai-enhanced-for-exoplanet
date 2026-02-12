@@ -302,24 +302,19 @@ jobs:
         git config --global user.name "${{ vars.NAME }}"
         
         echo "设置 data 分支... / Setting up data branch..."
-        today=${{ steps.crawl_step.outputs.crawl_date }}
+        today=$(date -u "+%Y-%m-%d")
+
+        # 1. 彻底移除 data 目录，解决 "fatal: 'data' could be both..." 冲突
+        rm -rf data assets/file-list.txt 2>/dev/null || true
         
-        # 在切换分支前，清理工作目录中可能冲突的未跟踪文件
-        # Before switching branches, clean untracked files that might conflict
-        # 这些文件已经保存到临时目录，所以可以安全删除
-        # These files are already saved to temporary directory, so safe to remove
-        rm -rf data/* 2>/dev/null || true
-        rm -f assets/file-list.txt 2>/dev/null || true
-        
-        # 检查 data 分支是否存在 / Check if data branch exists
+        # 检查 data 分支是否存在
         if git ls-remote --heads origin data | grep -q data; then
-          echo "data 分支已存在，切换到 data 分支 / Data branch exists, switching to data branch"
+          echo "data 分支已存在，切换到 data 分支..."
           git fetch origin data
-          # 使用 -f 强制切换，确保没有任何 untracked 文件能阻止切换
-          git checkout -f data
-          git reset --hard origin/data
+          # 2. 使用明确的 checkout 语法
+          git checkout -B data origin/data
         else
-          echo "data 分支不存在，创建新分支 / Data branch does not exist, creating new branch"
+          echo "data 分支不存在，创建新分支..."
           git checkout --orphan data
           git rm -rf --cached . 2>/dev/null || true
           mkdir -p data assets

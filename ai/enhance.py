@@ -2,6 +2,7 @@ import os
 import json
 import sys
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
 from queue import Queue
@@ -38,26 +39,37 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
     def is_sensitive(content: str) -> bool:
         """
         调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
-        返回 True 表示触发敏感词，False 表示未触发。
+        增加重试机制：失败时重试3次，若仍失败则默认放行(False)。
         """
-        try:
-            resp = requests.post(
-                "https://spam.dw-dengwei.workers.dev",
-                json={"text": content},
-                timeout=5
-            )
-            if resp.status_code == 200:
-                result = resp.json()
-                # 约定接口返回 {"sensitive": true/false, ...}
-                return result.get("sensitive", True)
-            else:
-                # 如果接口异常，默认放行(False)，避免因服务挂掉导致数据丢失
-                print(f"Sensitive check failed with status {resp.status_code}, defaulting to False (allow)", file=sys.stderr)
-                return False
-        except Exception as e:
-            # 如果请求超时或报错，默认放行(False)，避免数据丢失
-            print(f"Sensitive check error: {e}, defaulting to False (allow)", file=sys.stderr)
-            return False
+        max_retries = 3
+        retry_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    "https://spam.dw-dengwei.workers.dev",
+                    json={"text": content},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    return result.get("sensitive", True)
+                elif 500 <= resp.status_code < 600:
+                    # 服务器端错误，值得重试
+                    print(f"Sensitive check server error {resp.status_code}, retrying ({attempt + 1}/{max_retries})...", file=sys.stderr)
+                    time.sleep(retry_delay)
+                else:
+                    # 4xx 客户端错误或其他，通常重试无用，直接放行
+                    print(f"Sensitive check failed with status {resp.status_code}, defaulting to False (allow)", file=sys.stderr)
+                    return False
+            except Exception as e:
+                # 网络连接、超时等错误，重试
+                print(f"Sensitive check connection error: {e}, retrying ({attempt + 1}/{max_retries})...", file=sys.stderr)
+                time.sleep(retry_delay)
+        
+        # 重试耗尽，默认放行
+        print("Sensitive check failed after max retries, defaulting to False (allow)", file=sys.stderr)
+        return False
 
     def check_github_code(content: str) -> Dict:
         """提取并验证 GitHub 链接"""

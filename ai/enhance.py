@@ -2,7 +2,6 @@ import os
 import json
 import sys
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
 from queue import Queue
@@ -36,42 +35,9 @@ def parse_args():
     return parser.parse_args()
 
 def process_single_item(chain, item: Dict, language: str) -> Dict:
-    def is_sensitive(content: str) -> bool:
-        """
-        调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
-        增加重试机制：失败时重试3次，若仍失败则默认放行(False)。
-        使用 tqdm.write 打印日志以避免打断进度条。
-        """
-        max_retries = 3
-        retry_delay = 2  # seconds
-
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(
-                    "https://spam.dw-dengwei.workers.dev",
-                    json={"text": content},
-                    timeout=5
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    # 正常返回
-                    return result.get("sensitive", True)
-                elif 500 <= resp.status_code < 600:
-                    # 服务器端错误，值得重试
-                    tqdm.write(f"🔄 [Sensitive Check] Server error {resp.status_code}, retrying ({attempt + 1}/{max_retries})...")
-                    time.sleep(retry_delay)
-                else:
-                    # 4xx 客户端错误或其他，通常重试无用，直接放行
-                    tqdm.write(f"⚠️ [Sensitive Check] Failed with status {resp.status_code}, defaulting to False (allow)")
-                    return False
-            except Exception as e:
-                # 网络连接、超时等错误，重试
-                tqdm.write(f"🔌 [Sensitive Check] Connection error: {e}, retrying ({attempt + 1}/{max_retries})...")
-                time.sleep(retry_delay)
-        
-        # 重试耗尽，默认放行
-        tqdm.write("❌ [Sensitive Check] Failed after max retries, defaulting to False (allow)")
-        return False
+    # ------------------------------------------------------------------
+    # 修改点：已移除 is_sensitive 函数及其调用，直接进行处理
+    # ------------------------------------------------------------------
 
     def check_github_code(content: str) -> Dict:
         """提取并验证 GitHub 链接"""
@@ -120,13 +86,8 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 
         return code_info
 
-    # 检查 summary 字段
-    if is_sensitive(item.get("summary", "")):
-        # 使用 tqdm.write 确保日志可见
-        tqdm.write(f"⚠️ Skipping sensitive item (Summary): {item.get('id', 'unknown')} - {item.get('title', 'No Title')}")
-        return None
-
-    # 检测代码可用性
+    # 修改点：移除了对 summary 的 is_sensitive 检查
+    # 直接检测代码可用性
     code_info = check_github_code(item.get("summary", ""))
     if code_info:
         item.update(code_info)
@@ -161,6 +122,7 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 # 尝试解析修复后的 JSON
                 partial_data = json.loads(json_str)
             except Exception as json_e:
+                # 使用 tqdm.write 而不是 print，避免打断进度条
                 tqdm.write(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}")
         
         # Merge partial data with defaults to ensure all fields exist
@@ -176,11 +138,8 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
         if field not in item['AI']:
             item['AI'][field] = default_ai_fields[field]
 
-    # 检查 AI 生成的所有字段
-    for k, v in item.get("AI", {}).values():
-        if is_sensitive(str(v)):
-            tqdm.write(f"⚠️ Skipping sensitive item (AI content - {k}): {item.get('id', 'unknown')}")
-            return None
+    # 修改点：移除了对 AI 生成结果的 is_sensitive 检查
+    
     return item
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:

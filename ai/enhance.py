@@ -40,6 +40,7 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
         """
         调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
         增加重试机制：失败时重试3次，若仍失败则默认放行(False)。
+        使用 tqdm.write 打印日志以避免打断进度条。
         """
         max_retries = 3
         retry_delay = 2  # seconds
@@ -53,22 +54,23 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 )
                 if resp.status_code == 200:
                     result = resp.json()
+                    # 正常返回
                     return result.get("sensitive", True)
                 elif 500 <= resp.status_code < 600:
                     # 服务器端错误，值得重试
-                    print(f"Sensitive check server error {resp.status_code}, retrying ({attempt + 1}/{max_retries})...", file=sys.stderr)
+                    tqdm.write(f"🔄 [Sensitive Check] Server error {resp.status_code}, retrying ({attempt + 1}/{max_retries})...")
                     time.sleep(retry_delay)
                 else:
                     # 4xx 客户端错误或其他，通常重试无用，直接放行
-                    print(f"Sensitive check failed with status {resp.status_code}, defaulting to False (allow)", file=sys.stderr)
+                    tqdm.write(f"⚠️ [Sensitive Check] Failed with status {resp.status_code}, defaulting to False (allow)")
                     return False
             except Exception as e:
                 # 网络连接、超时等错误，重试
-                print(f"Sensitive check connection error: {e}, retrying ({attempt + 1}/{max_retries})...", file=sys.stderr)
+                tqdm.write(f"🔌 [Sensitive Check] Connection error: {e}, retrying ({attempt + 1}/{max_retries})...")
                 time.sleep(retry_delay)
         
         # 重试耗尽，默认放行
-        print("Sensitive check failed after max retries, defaulting to False (allow)", file=sys.stderr)
+        tqdm.write("❌ [Sensitive Check] Failed after max retries, defaulting to False (allow)")
         return False
 
     def check_github_code(content: str) -> Dict:
@@ -120,7 +122,8 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
 
     # 检查 summary 字段
     if is_sensitive(item.get("summary", "")):
-        print(f"⚠️ Skipping sensitive item (Summary): {item.get('id', 'unknown')} - {item.get('title', 'No Title')}", file=sys.stderr)
+        # 使用 tqdm.write 确保日志可见
+        tqdm.write(f"⚠️ Skipping sensitive item (Summary): {item.get('id', 'unknown')} - {item.get('title', 'No Title')}")
         return None
 
     # 检测代码可用性
@@ -158,14 +161,14 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 # 尝试解析修复后的 JSON
                 partial_data = json.loads(json_str)
             except Exception as json_e:
-                print(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}", file=sys.stderr)
+                tqdm.write(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}")
         
         # Merge partial data with defaults to ensure all fields exist
         item['AI'] = {**default_ai_fields, **partial_data}
-        print(f"Using partial AI data for {item.get('id', 'unknown')}: {list(partial_data.keys())}", file=sys.stderr)
+        tqdm.write(f"Using partial AI data for {item.get('id', 'unknown')}: {list(partial_data.keys())}")
     except Exception as e:
         # Catch any other exceptions and provide default values
-        print(f"Unexpected error for {item.get('id', 'unknown')}: {e}", file=sys.stderr)
+        tqdm.write(f"Unexpected error for {item.get('id', 'unknown')}: {e}")
         item['AI'] = default_ai_fields
     
     # Final validation to ensure all required fields exist
@@ -176,14 +179,15 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
     # 检查 AI 生成的所有字段
     for k, v in item.get("AI", {}).values():
         if is_sensitive(str(v)):
-            print(f"⚠️ Skipping sensitive item (AI content - {k}): {item.get('id', 'unknown')}", file=sys.stderr)
+            tqdm.write(f"⚠️ Skipping sensitive item (AI content - {k}): {item.get('id', 'unknown')}")
             return None
     return item
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
     """并行处理所有数据项"""
     llm = ChatOpenAI(model=model_name).with_structured_output(Structure, method="function_calling")
-    print('Connect to:', model_name, file=sys.stderr)
+    # 使用 tqdm.write 替代 print
+    tqdm.write(f'Connect to: {model_name}')
     
     prompt_template = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(system),
@@ -212,7 +216,7 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
                 result = future.result()
                 processed_data[idx] = result
             except Exception as e:
-                print(f"Item at index {idx} generated an exception: {e}", file=sys.stderr)
+                tqdm.write(f"Item at index {idx} generated an exception: {e}")
                 # Add default AI fields to ensure consistency
                 processed_data[idx] = data[idx]
                 processed_data[idx]['AI'] = {
@@ -234,7 +238,7 @@ def main():
     target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')
     if os.path.exists(target_file):
         os.remove(target_file)
-        print(f'Removed existing file: {target_file}', file=sys.stderr)
+        tqdm.write(f'Removed existing file: {target_file}')
 
     # 读取数据
     data = []
@@ -251,7 +255,7 @@ def main():
             unique_data.append(item)
 
     data = unique_data
-    print('Open:', args.data, file=sys.stderr)
+    tqdm.write(f'Open: {args.data}')
     
     # 并行处理所有数据
     processed_data = process_all_items(

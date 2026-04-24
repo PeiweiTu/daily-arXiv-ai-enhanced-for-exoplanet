@@ -1,4 +1,4 @@
-Please analyze the following abstract of papers. 
+Language: {language}
+Content: {content}
 
-Content:
-{content}
+Please output a JSON object with fields: tldr, motivation, method, result, conclusion.

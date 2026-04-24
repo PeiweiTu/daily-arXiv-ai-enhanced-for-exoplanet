@@ -4,96 +4,74 @@ import sys
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
-from queue import Queue
-from threading import Lock
-# INSERT_YOUR_CODE
 import requests
 
 import dotenv
 import argparse
 from tqdm import tqdm
 
-import langchain_core.exceptions
 from langchain_openai import ChatOpenAI
-from langchain.prompts import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
-from structure import Structure
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import SystemMessage, HumanMessage
 
 if os.path.exists('.env'):
     dotenv.load_dotenv()
-template = open("template.txt", "r").read()
+
+# 注意：必须按照 DeepSeek JSON Output 要求修改 system.txt 和 template.txt
+# - system.txt 中必须包含 "json" 字样，并给出期望的输出 JSON 格式示例
+# - template.txt 中必须明确要求模型输出 JSON
+# 具体示例在文件末尾的注释中给出
 system = open("system.txt", "r").read()
+template = open("template.txt", "r").read()
 
 def parse_args():
-    """解析命令行参数"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True, help="jsonline data file")
     parser.add_argument("--max_workers", type=int, default=1, help="Maximum number of parallel workers")
     return parser.parse_args()
 
-def process_single_item(chain, item: Dict, language: str) -> Dict:
-    # ------------------------------------------------------------------
-    # 修改点：已移除 is_sensitive 函数及其调用，直接进行处理
-    # ------------------------------------------------------------------
-
-    def check_github_code(content: str) -> Dict:
-        """提取并验证 GitHub 链接"""
-        code_info = {}
-
-        # 1. 优先匹配 github.com/owner/repo 格式
-        github_pattern = r"https?://github\.com/([a-zA-Z0-9-_]+)/([a-zA-Z0-9-_\.]+)"
-        match = re.search(github_pattern, content)
+def check_github_code(content: str) -> Dict:
+    """提取并验证 GitHub 链接（与原逻辑相同）"""
+    code_info = {}
+    github_pattern = r"https?://github\.com/([a-zA-Z0-9-_]+)/([a-zA-Z0-9-_\.]+)"
+    match = re.search(github_pattern, content)
+    
+    if match:
+        owner, repo = match.groups()
+        repo = repo.rstrip(".git").rstrip(".,)")
+        full_url = f"https://github.com/{owner}/{repo}"
+        code_info["code_url"] = full_url
         
-        if match:
-            owner, repo = match.groups()
-            # 清理 repo 名称，去掉可能的 .git 后缀或末尾的标点
-            repo = repo.rstrip(".git").rstrip(".,)")
-            
-            full_url = f"https://github.com/{owner}/{repo}"
-            code_info["code_url"] = full_url
-            
-            # 尝试调用 GitHub API 获取信息
-            github_token = os.environ.get("TOKEN_GITHUB")
-            headers = {"Accept": "application/vnd.github.v3+json"}
-            if github_token:
-                headers["Authorization"] = f"token {github_token}"
-            
-            try:
-                api_url = f"https://api.github.com/repos/{owner}/{repo}"
-                resp = requests.get(api_url, headers=headers, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    code_info["code_stars"] = data.get("stargazers_count", 0)
-                    code_info["code_last_update"] = data.get("pushed_at", "")[:10]
-            except Exception:
-                # API 调用失败不影响主流程
-                pass
-            return code_info
-
-        # 2. 如果没有 github.com，尝试匹配 github.io
-        github_io_pattern = r"https?://[a-zA-Z0-9-_]+\.github\.io(?:/[a-zA-Z0-9-_\.]+)*"
-        match_io = re.search(github_io_pattern, content)
+        github_token = os.environ.get("TOKEN_GITHUB")
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
         
-        if match_io:
-            url = match_io.group(0)
-            # 清理末尾标点
-            url = url.rstrip(".,)")
-            code_info["code_url"] = url
-            # github.io 不进行 star 和 update 判断
-                
+        try:
+            api_url = f"https://api.github.com/repos/{owner}/{repo}"
+            resp = requests.get(api_url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                code_info["code_stars"] = data.get("stargazers_count", 0)
+                code_info["code_last_update"] = data.get("pushed_at", "")[:10]
+        except Exception:
+            pass
         return code_info
 
-    # 修改点：移除了对 summary 的 is_sensitive 检查
-    # 直接检测代码可用性
+    github_io_pattern = r"https?://[a-zA-Z0-9-_]+\.github\.io(?:/[a-zA-Z0-9-_\.]+)*"
+    match_io = re.search(github_io_pattern, content)
+    if match_io:
+        url = match_io.group(0).rstrip(".,)")
+        code_info["code_url"] = url
+    return code_info
+
+def process_single_item(llm, system_prompt, user_template, item: Dict, language: str) -> Dict:
+    """处理单个数据项，使用 JSON Output 模式"""
+    # 检测 GitHub 代码
     code_info = check_github_code(item.get("summary", ""))
     if code_info:
         item.update(code_info)
 
-    """处理单个数据项"""
-    # Default structure with meaningful fallback values
     default_ai_fields = {
         "tldr": "Summary generation failed",
         "motivation": "Motivation analysis unavailable",
@@ -101,82 +79,69 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
         "result": "Result analysis unavailable",
         "conclusion": "Conclusion extraction failed"
     }
-    
+
+    # 构造 messages
+    user_prompt = user_template.format(language=language, content=item['summary'])
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt)
+    ]
+
     try:
-        response: Structure = chain.invoke({
-            "language": language,
-            "content": item['summary']
-        })
-        item['AI'] = response.model_dump()
-    except langchain_core.exceptions.OutputParserException as e:
-        # 尝试从错误信息中提取 JSON 字符串并修复
-        error_msg = str(e)
-        partial_data = {}
-        
-        if "Function Structure arguments:" in error_msg:
-            try:
-                # 提取 JSON 字符串
-                json_str = error_msg.split("Function Structure arguments:", 1)[1].strip().split('are not valid JSON')[0].strip()
-                # 预处理 LaTeX 数学符号 - 使用四个反斜杠来确保正确转义
-                json_str = json_str.replace('\\', '\\\\')
-                # 尝试解析修复后的 JSON
-                partial_data = json.loads(json_str)
-            except Exception as json_e:
-                # 使用 tqdm.write 而不是 print，避免打断进度条
-                tqdm.write(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}")
-        
-        # Merge partial data with defaults to ensure all fields exist
-        item['AI'] = {**default_ai_fields, **partial_data}
-        tqdm.write(f"Using partial AI data for {item.get('id', 'unknown')}: {list(partial_data.keys())}")
+        # 调用 LLM，强制 JSON 输出
+        response = llm.invoke(messages)
+        content = response.content
+        if not content or content.strip() == "":
+            raise ValueError("Empty response content from LLM")
+
+        # 尝试解析 JSON
+        parsed = json.loads(content)
+        # 合并默认值，确保所有字段存在
+        item['AI'] = {**default_ai_fields, **parsed}
+
+    except json.JSONDecodeError as e:
+        tqdm.write(f"JSON decode error for {item.get('id', 'unknown')}: {e}")
+        tqdm.write(f"Raw content: {content[:200]}...")
+        item['AI'] = default_ai_fields
     except Exception as e:
-        # Catch any other exceptions and provide default values
         tqdm.write(f"Unexpected error for {item.get('id', 'unknown')}: {e}")
         item['AI'] = default_ai_fields
-    
-    # Final validation to ensure all required fields exist
-    for field in default_ai_fields.keys():
+
+    # 最终检查，确保每个必需字段都存在
+    for field in default_ai_fields:
         if field not in item['AI']:
             item['AI'][field] = default_ai_fields[field]
 
-    # 修改点：移除了对 AI 生成结果的 is_sensitive 检查
-    
     return item
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
-    """并行处理所有数据项"""
-    llm = ChatOpenAI(model=model_name).with_structured_output(Structure)
-    # 使用 tqdm.write 替代 print
+    """并行处理所有数据项，使用 JSON Output"""
+    # 创建支持 JSON Output 的 LLM 实例
+    llm = ChatOpenAI(
+        model=model_name,
+        model_kwargs={"response_format": {"type": "json_object"}}
+    )
     tqdm.write(f'Connect to: {model_name}')
-    
-    prompt_template = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(system),
-        HumanMessagePromptTemplate.from_template(template=template)
-    ])
 
-    chain = prompt_template | llm
-    
-    # 使用线程池并行处理
-    processed_data = [None] * len(data)  # 预分配结果列表
+    # 读取 prompt 文件（需要符合 JSON Output 要求）
+    with open("system.txt", "r") as f:
+        system_prompt = f.read()
+    with open("template.txt", "r") as f:
+        user_template = f.read()
+
+    processed_data = [None] * len(data)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务
         future_to_idx = {
-            executor.submit(process_single_item, chain, item, language): idx
+            executor.submit(process_single_item, llm, system_prompt, user_template, item, language): idx
             for idx, item in enumerate(data)
         }
-        
-        # 使用tqdm显示进度
-        for future in tqdm(
-            as_completed(future_to_idx),
-            total=len(data),
-            desc="Processing items"
-        ):
+        for future in tqdm(as_completed(future_to_idx), total=len(data), desc="Processing items"):
             idx = future_to_idx[future]
             try:
                 result = future.result()
                 processed_data[idx] = result
             except Exception as e:
                 tqdm.write(f"Item at index {idx} generated an exception: {e}")
-                # Add default AI fields to ensure consistency
                 processed_data[idx] = data[idx]
                 processed_data[idx]['AI'] = {
                     "tldr": "Processing failed",
@@ -185,21 +150,18 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
                     "result": "Processing failed",
                     "conclusion": "Processing failed"
                 }
-    
     return processed_data
 
 def main():
     args = parse_args()
-    model_name = os.environ.get("MODEL_NAME", 'deepseek-chat')
+    model_name = os.environ.get("MODEL_NAME", 'deepseek-chat')   # 若使用 deepseek-reasoner 也可
     language = os.environ.get("LANGUAGE", 'Chinese')
 
-    # 检查并删除目标文件
     target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')
     if os.path.exists(target_file):
         os.remove(target_file)
         tqdm.write(f'Removed existing file: {target_file}')
 
-    # 读取数据
     data = []
     with open(args.data, "r") as f:
         for line in f:
@@ -212,19 +174,11 @@ def main():
         if item['id'] not in seen_ids:
             seen_ids.add(item['id'])
             unique_data.append(item)
-
     data = unique_data
     tqdm.write(f'Open: {args.data}')
-    
-    # 并行处理所有数据
-    processed_data = process_all_items(
-        data,
-        model_name,
-        language,
-        args.max_workers
-    )
-    
-    # 保存结果
+
+    processed_data = process_all_items(data, model_name, language, args.max_workers)
+
     with open(target_file, "w") as f:
         for item in processed_data:
             if item is not None:

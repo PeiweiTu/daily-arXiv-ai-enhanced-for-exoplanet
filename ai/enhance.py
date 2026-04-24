@@ -144,7 +144,7 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
     """并行处理所有数据项"""
-    llm = ChatOpenAI(model=model_name).with_structured_output(Structure, method="function_calling")
+    llm = ChatOpenAI(model=model_name).with_structured_output(Structure)
     # 使用 tqdm.write 替代 print
     tqdm.write(f'Connect to: {model_name}')
     

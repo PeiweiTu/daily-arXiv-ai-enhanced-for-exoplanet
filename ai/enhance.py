@@ -1,28 +1,22 @@
 import os
 import json
-import sys
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
 import requests
-#
 import dotenv
 import argparse
 from tqdm import tqdm
-
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import SystemMessage, HumanMessage
+from openai import OpenAI
 
 if os.path.exists('.env'):
     dotenv.load_dotenv()
 
-# 注意：必须按照 DeepSeek JSON Output 要求修改 system.txt 和 template.txt
-# - system.txt 中必须包含 "json" 字样，并给出期望的输出 JSON 格式示例
-# - template.txt 中必须明确要求模型输出 JSON
-# 具体示例在文件末尾的注释中给出
-system = open("system.txt", "r").read()
-template = open("template.txt", "r").read()
+# 读取 prompt 文件
+with open("system.txt", "r") as f:
+    SYSTEM_PROMPT = f.read()
+with open("template.txt", "r") as f:
+    USER_TEMPLATE = f.read()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -31,22 +25,18 @@ def parse_args():
     return parser.parse_args()
 
 def check_github_code(content: str) -> Dict:
-    """提取并验证 GitHub 链接（与原逻辑相同）"""
     code_info = {}
     github_pattern = r"https?://github\.com/([a-zA-Z0-9-_]+)/([a-zA-Z0-9-_\.]+)"
     match = re.search(github_pattern, content)
-    
     if match:
         owner, repo = match.groups()
         repo = repo.rstrip(".git").rstrip(".,)")
         full_url = f"https://github.com/{owner}/{repo}"
         code_info["code_url"] = full_url
-        
         github_token = os.environ.get("TOKEN_GITHUB")
         headers = {"Accept": "application/vnd.github.v3+json"}
         if github_token:
             headers["Authorization"] = f"token {github_token}"
-        
         try:
             api_url = f"https://api.github.com/repos/{owner}/{repo}"
             resp = requests.get(api_url, headers=headers, timeout=5)
@@ -57,7 +47,6 @@ def check_github_code(content: str) -> Dict:
         except Exception:
             pass
         return code_info
-
     github_io_pattern = r"https?://[a-zA-Z0-9-_]+\.github\.io(?:/[a-zA-Z0-9-_\.]+)*"
     match_io = re.search(github_io_pattern, content)
     if match_io:
@@ -65,8 +54,7 @@ def check_github_code(content: str) -> Dict:
         code_info["code_url"] = url
     return code_info
 
-def process_single_item(llm, system_prompt, user_template, item: Dict, language: str) -> Dict:
-    """处理单个数据项，使用 JSON Output 模式"""
+def process_single_item(client, model_name, system_prompt, user_template, item: Dict, language: str) -> Dict:
     # 检测 GitHub 代码
     code_info = check_github_code(item.get("summary", ""))
     if code_info:
@@ -80,34 +68,30 @@ def process_single_item(llm, system_prompt, user_template, item: Dict, language:
         "conclusion": "Conclusion extraction failed"
     }
 
-    # 构造 messages
     user_prompt = user_template.format(language=language, content=item['summary'])
     messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt)
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
     ]
 
     try:
-        # 调用 LLM，强制 JSON 输出
-        response = llm.invoke(messages)
-        content = response.content
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=2048  # 防止截断
+        )
+        content = response.choices[0].message.content
         if not content or content.strip() == "":
-            raise ValueError("Empty response content from LLM")
+            raise ValueError("Empty response content")
 
-        # 尝试解析 JSON
         parsed = json.loads(content)
-        # 合并默认值，确保所有字段存在
         item['AI'] = {**default_ai_fields, **parsed}
-
-    except json.JSONDecodeError as e:
-        tqdm.write(f"JSON decode error for {item.get('id', 'unknown')}: {e}")
-        tqdm.write(f"Raw content: {content[:200]}...")
-        item['AI'] = default_ai_fields
     except Exception as e:
-        tqdm.write(f"Unexpected error for {item.get('id', 'unknown')}: {e}")
+        tqdm.write(f"Error for {item.get('id', 'unknown')}: {e}")
         item['AI'] = default_ai_fields
 
-    # 最终检查，确保每个必需字段都存在
+    # 确保所有字段存在
     for field in default_ai_fields:
         if field not in item['AI']:
             item['AI'][field] = default_ai_fields[field]
@@ -115,24 +99,17 @@ def process_single_item(llm, system_prompt, user_template, item: Dict, language:
     return item
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
-    """并行处理所有数据项，使用 JSON Output"""
-    # 创建支持 JSON Output 的 LLM 实例
-    llm = ChatOpenAI(
-        model=model_name,
-        model_kwargs={"response_format": {"type": "json_object"}}
+    # 创建原生 OpenAI 客户端 (兼容 DeepSeek)
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com")
     )
     tqdm.write(f'Connect to: {model_name}')
-
-    # 读取 prompt 文件（需要符合 JSON Output 要求）
-    with open("system.txt", "r") as f:
-        system_prompt = f.read()
-    with open("template.txt", "r") as f:
-        user_template = f.read()
 
     processed_data = [None] * len(data)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
-            executor.submit(process_single_item, llm, system_prompt, user_template, item, language): idx
+            executor.submit(process_single_item, client, model_name, SYSTEM_PROMPT, USER_TEMPLATE, item, language): idx
             for idx, item in enumerate(data)
         }
         for future in tqdm(as_completed(future_to_idx), total=len(data), desc="Processing items"):
@@ -154,7 +131,7 @@ def process_all_items(data: List[Dict], model_name: str, language: str, max_work
 
 def main():
     args = parse_args()
-    model_name = os.environ.get("MODEL_NAME", 'deepseek-chat')   # 若使用 deepseek-reasoner 也可
+    model_name = os.environ.get("MODEL_NAME", 'deepseek-chat')
     language = os.environ.get("LANGUAGE", 'Chinese')
 
     target_file = args.data.replace('.jsonl', f'_AI_enhanced_{language}.jsonl')

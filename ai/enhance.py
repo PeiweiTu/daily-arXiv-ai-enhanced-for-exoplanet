@@ -79,6 +79,7 @@ def process_single_item(client, model_name, system_prompt, user_template, item: 
             model=model_name,
             messages=messages,
             response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
             max_tokens=2048  # 防止截断
         )
         content = response.choices[0].message.content
